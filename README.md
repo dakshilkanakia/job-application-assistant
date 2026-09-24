@@ -1,6 +1,8 @@
-<title>fn+F5 Assistant</title>
+<title>Job Application Assistant</title>
 
-# fn+F5 Assistant
+# Job Application Assistant
+
+Trigger: **fn+F5**.
 
 A tiny macOS background tool: press **fn+F5** anywhere, it screenshots your screen,
 hands it to a local [Claude Code](https://claude.com/claude-code) session along with
