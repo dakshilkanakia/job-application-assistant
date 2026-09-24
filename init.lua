@@ -12,12 +12,18 @@ local SHOT_PATH = "/tmp/fn_f5_assistant_screen.png"
 local CONTEXT_DIR = hs.configdir .. "/context"
 local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id.txt"
 
+local CAVEAT_MARKER = "---CAVEAT---"
+
 local ANSWER_INSTRUCTIONS =
   "Find the visible question/field (form question, multiple choice, coding prompt, whatever is " ..
   "on screen) and give a direct, ready-to-paste answer using MY real background where relevant " ..
   "(specific projects, numbers, technologies) instead of a generic answer. If it's multiple " ..
   "choice, state the choice first then a one-line reason. If it's a text field, write the actual " ..
-  "answer text, no preamble, no 'Here is...'. Keep it as short as the question allows."
+  "answer text, no preamble, no 'Here is...'. Keep it as short as the question allows. " ..
+  "If you have to guess a fact that isn't in my background material (an exact zip code, a date, " ..
+  "whatever) and think I should double-check it: put ONLY the raw paste-ready answer first, then " ..
+  "on its own new line the exact text '" .. CAVEAT_MARKER .. "', then a one-line note explaining " ..
+  "the guess. If no caveat is needed, output only the raw answer with no marker at all."
 
 -- First-ever call: load background material once, this becomes part of the session.
 -- Edit the file list below to match whatever you actually put in ./context.
@@ -72,12 +78,22 @@ local function showAnswer(text)
     :allowTextEntry(false)
     :level(hs.drawing.windowLevels.floating)
 
-  local escaped = text:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\n", "<br>")
+  local answerPart, caveatPart = text:match("^(.-)\n?" .. CAVEAT_MARKER:gsub("%-", "%%-") .. "\n?(.*)$")
+  answerPart = answerPart or text
+  local function esc(s) return s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\n", "<br>") end
+
+  local caveatHtml = ""
+  if caveatPart and #caveatPart:gsub("%s", "") > 0 then
+    caveatHtml = [[<div style="margin-top:10px;padding-top:10px;border-top:1px solid #444;
+      color:#e0b84d;font-size:12px;">⚠ ]] .. esc(caveatPart) .. [[</div>]]
+  end
+
   local html = [[
     <html><body style="font-family:-apple-system,sans-serif;font-size:14px;
       padding:14px;background:#1e1e1e;color:#f0f0f0;margin:0;">
-      <div>]] .. escaped .. [[</div>
-      <div style="margin-top:14px;font-size:11px;color:#888;">Copied to clipboard. Press F6 to dismiss.</div>
+      <div>]] .. esc(answerPart) .. [[</div>
+      ]] .. caveatHtml .. [[
+      <div style="margin-top:14px;font-size:11px;color:#888;">Answer copied to clipboard (caveat excluded). Press F6 to dismiss.</div>
     </body></html>
   ]]
   answerWindow:html(html)
@@ -95,7 +111,11 @@ local function handleFinalResult(exitCode, stdOut, stdErr)
     hs.alert.show("Claude error: " .. (stdErr ~= "" and stdErr or ("exit " .. exitCode)))
     return
   end
-  hs.pasteboard.setContents(stdOut)
+  -- Split off any caveat so only the raw answer (never the caveat note) hits the
+  -- clipboard — a caveat sentence pasted into a real form field would corrupt it.
+  local answerPart = stdOut:match("^(.-)\n?" .. CAVEAT_MARKER:gsub("%-", "%%-") .. "\n?.*$")
+  local clipboardText = (answerPart or stdOut):gsub("%s+$", "")
+  hs.pasteboard.setContents(clipboardText)
   showAnswer(stdOut)
 end
 
