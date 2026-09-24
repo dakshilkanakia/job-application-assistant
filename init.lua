@@ -1,4 +1,4 @@
--- fn+F5 assistant: screenshot -> claude -p (headless, Read-only, resumed session)
+-- fn+A assistant: screenshot -> claude -p (headless, Read-only, resumed session)
 -- -> floating answer + clipboard.
 --
 -- Setup: see README.md. Put your own resume/references/notes in ./context and
@@ -150,13 +150,13 @@ local function captureAndAsk()
   end, {"-x", SHOT_PATH}):start()
 end
 
--- fn+F5 trigger. hs.hotkey.bind's modifier list doesn't reliably support "fn"
+-- fn+A trigger. hs.hotkey.bind's modifier list doesn't reliably support "fn"
 -- across Hammerspoon versions (it's not a real Carbon hotkey modifier), so we
 -- watch raw keyDown events instead and check the fn flag ourselves.
-local F5_KEYCODE = hs.keycodes.map["f5"]
+local TRIGGER_KEYCODE = hs.keycodes.map["a"]
 
 fnF5Watcher = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
-  if event:getKeyCode() == F5_KEYCODE and event:getFlags().fn then
+  if event:getKeyCode() == TRIGGER_KEYCODE and event:getFlags().fn then
     captureAndAsk()
     return true -- swallow the event, don't pass it through
   end
@@ -166,4 +166,4 @@ fnF5Watcher:start()
 
 hs.hotkey.bind({}, "F6", closeAnswerWindow)
 
-hs.alert.show("fn+F5 assistant loaded")
+hs.alert.show("fn+A assistant loaded")

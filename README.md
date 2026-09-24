@@ -2,9 +2,9 @@
 
 # Job Application Assistant
 
-Trigger: **fn+F5**.
+Trigger: **fn+A**.
 
-A tiny macOS background tool: press **fn+F5** anywhere, it screenshots your screen,
+A tiny macOS background tool: press **fn+A** anywhere, it screenshots your screen,
 hands it to a local [Claude Code](https://claude.com/claude-code) session along with
 your own background material (resume, notes, whatever), and pops up a direct answer
 — also copied to your clipboard.
@@ -16,7 +16,7 @@ hotkey, paste.
 ## How it works
 
 - [Hammerspoon](https://www.hammerspoon.org/) runs `init.lua` in the background and
-  listens for **fn+F5** via a raw event tap (not a normal hotkey binding — macOS's Fn
+  listens for **fn+A** via a raw event tap (not a normal hotkey binding — macOS's Fn
   modifier isn't exposed to Hammerspoon's regular `hs.hotkey.bind` API reliably).
 - On trigger: `screencapture` grabs the screen silently, then `claude -p` (Claude
   Code's headless mode, restricted to the `Read` tool only) reads it and answers.
@@ -44,7 +44,7 @@ hotkey, paste.
    - **Accessibility** — required for the global hotkey.
    - **Screen Recording** — required for the screenshot (System Settings → Privacy &
      Security → Screen Recording → enable Hammerspoon).
-6. Press **fn+F5** on any screen with a question visible.
+6. Press **fn+A** on any screen with a question visible.
 
 Optional: add Hammerspoon to Login Items (System Settings → General → Login Items)
 so this survives reboots.
