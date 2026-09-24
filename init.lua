@@ -93,7 +93,7 @@ local function showAnswer(text)
       padding:14px;background:#1e1e1e;color:#f0f0f0;margin:0;">
       <div>]] .. esc(answerPart) .. [[</div>
       ]] .. caveatHtml .. [[
-      <div style="margin-top:14px;font-size:11px;color:#888;">Answer copied to clipboard (caveat excluded). Press F6 to dismiss.</div>
+      <div style="margin-top:14px;font-size:11px;color:#888;">Answer copied to clipboard (caveat excluded). Press Esc or F6 to dismiss.</div>
     </body></html>
   ]]
   answerWindow:html(html)
@@ -154,12 +154,23 @@ end
 -- across Hammerspoon versions (it's not a real Carbon hotkey modifier), so we
 -- watch raw keyDown events instead and check the fn flag ourselves.
 local TRIGGER_KEYCODE = hs.keycodes.map["a"]
+local ESCAPE_KEYCODE = hs.keycodes.map["escape"]
 
 fnF5Watcher = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
-  if event:getKeyCode() == TRIGGER_KEYCODE and event:getFlags().fn then
+  local keyCode = event:getKeyCode()
+
+  if keyCode == TRIGGER_KEYCODE and event:getFlags().fn then
     captureAndAsk()
     return true -- swallow the event, don't pass it through
   end
+
+  -- Only swallow Escape while the popup is actually open, so it behaves
+  -- normally (cancel dialogs, exit fields, etc.) everywhere else.
+  if keyCode == ESCAPE_KEYCODE and answerWindow ~= nil then
+    closeAnswerWindow()
+    return true
+  end
+
   return false
 end)
 fnF5Watcher:start()
