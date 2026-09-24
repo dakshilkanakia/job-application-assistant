@@ -15,15 +15,20 @@ local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id.txt"
 local CAVEAT_MARKER = "---CAVEAT---"
 
 local ANSWER_INSTRUCTIONS =
-  "Find the visible question/field (form question, multiple choice, coding prompt, whatever is " ..
-  "on screen) and give a direct, ready-to-paste answer using MY real background where relevant " ..
-  "(specific projects, numbers, technologies) instead of a generic answer. If it's multiple " ..
-  "choice, state the choice first then a one-line reason. If it's a text field, write the actual " ..
-  "answer text, no preamble, no 'Here is...'. Keep it as short as the question allows. " ..
+  "Find EVERY visible question/field on screen — there may be just one, or several " ..
+  "(form questions, multiple choice, coding prompts). Answer ALL of them, don't stop at the " ..
+  "first. If there's only one, just give that one answer directly, no label. If there are " ..
+  "several, prefix each with a short label for which question it answers (e.g. the field name or " ..
+  "a few words of the question), then the answer, separated by a blank line between questions. " ..
+  "Each answer should use MY real background where relevant (specific projects, numbers, " ..
+  "technologies) instead of a generic answer. If it's multiple choice, state the choice first " ..
+  "then a one-line reason. If it's a text field, write the actual answer text, no preamble, no " ..
+  "'Here is...'. Keep each answer as short as its question allows. " ..
   "If you have to guess a fact that isn't in my background material (an exact zip code, a date, " ..
-  "whatever) and think I should double-check it: put ONLY the raw paste-ready answer first, then " ..
-  "on its own new line the exact text '" .. CAVEAT_MARKER .. "', then a one-line note explaining " ..
-  "the guess. If no caveat is needed, output only the raw answer with no marker at all."
+  "whatever) and think I should double-check it: put the raw paste-ready answer(s) first, then " ..
+  "on its own new line the exact text '" .. CAVEAT_MARKER .. "', then a short note listing which " ..
+  "answer(s) were guesses and why. If no caveat is needed anywhere, output only the raw answer(s) " ..
+  "with no marker at all."
 
 -- First-ever call: load background material once, this becomes part of the session.
 -- Edit the file list below to match whatever you actually put in ./context.
