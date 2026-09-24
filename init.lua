@@ -1,34 +1,54 @@
 -- fn+A assistant: screenshot -> claude -p (headless, Read-only, resumed session)
--- -> floating answer + clipboard.
+-- -> auto-fill or floating answer + clipboard.
 --
 -- Setup: see README.md. Put your own resume/references/notes in ./context and
 -- fix CLAUDE_BIN below (GUI apps often don't inherit your shell's PATH).
 
+require("hs.ipc")
+hs.ipc.cliInstall() -- lets you test/debug via `hs -c "..."` from Terminal
+
+local ax = require("hs.axuielement")
+
 -- Run `which claude` in Terminal and paste the absolute path here.
 local CLAUDE_BIN = "/usr/local/bin/claude"
 local SCREENCAPTURE_BIN = "/usr/sbin/screencapture"
-local SHOT_PATH = "/tmp/fn_f5_assistant_screen.png"
+local SHOT_PATH = "/tmp/cc_assistant_screen.png"
 
 local CONTEXT_DIR = hs.configdir .. "/context"
 local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id.txt"
 
 local CAVEAT_MARKER = "---CAVEAT---"
+local MULTI_MARKER = "---MULTI---"
+local FOCUS_MARKER = "---FOCUS---"
 
+-- Every "block" below means: a short label line, then a newline, then the
+-- answer itself (which can span multiple lines, e.g. code), with a full blank
+-- line between one block and the next.
 local ANSWER_INSTRUCTIONS =
-  "Find EVERY visible question/field on screen — there may be just one, or several " ..
-  "(form questions, multiple choice, coding prompts). Answer ALL of them, don't stop at the " ..
-  "first. If there's only one, just give that one answer directly, no label. If there are " ..
-  "several, prefix each with a short label for which question it answers (e.g. the field name or " ..
-  "a few words of the question), then the answer, separated by a blank line between questions. " ..
-  "Each answer should use MY real background where relevant (specific projects, numbers, " ..
-  "technologies) instead of a generic answer. If it's multiple choice, state the choice first " ..
-  "then a one-line reason. If it's a text field, write the actual answer text, no preamble, no " ..
-  "'Here is...'. Keep each answer as short as its question allows. " ..
+  "The screen may show a long form with MANY fields — most already filled in, or not yet " ..
+  "relevant — or just one question/prompt (e.g. a coding prompt) with nothing else. " ..
+  "Answer EVERY visible question/field that isn't already filled in with unrelated content, not " ..
+  "just one. Each answer should use MY real background where relevant (specific projects, " ..
+  "numbers, technologies) instead of a generic answer. If it's multiple choice, state the choice " ..
+  "first then a one-line reason. If it's a text field, write the actual answer text, no " ..
+  "preamble, no 'Here is...'. Keep each answer as short as its question allows. " ..
+  "Format your response based on how many questions there are:\n" ..
+  "- Exactly ONE question/field visible total: output just its raw answer, no label, no marker.\n" ..
+  "- SEVERAL questions/fields: look for the ONE that currently has visible cursor focus (a " ..
+  "highlighted border/outline, or a blinking text cursor — the normal browser focus indicator).\n" ..
+  "  - If you can identify it: start your response with the exact line '" .. FOCUS_MARKER ..
+  "' on its own, then put THAT question's answer first as a block (short label line, newline, " ..
+  "the answer), then a blank line, then every other visible question as further blocks in the " ..
+  "same format, each separated by a blank line.\n" ..
+  "  - If you can't tell which one is focused (no visible indicator, or it's a review/summary " ..
+  "screen with nothing actively focused): start your response with the exact line '" ..
+  MULTI_MARKER .. "' instead, then every visible question as label+answer blocks separated by " ..
+  "blank lines, in whatever order they appear on screen.\n" ..
   "If you have to guess a fact that isn't in my background material (an exact zip code, a date, " ..
-  "whatever) and think I should double-check it: put the raw paste-ready answer(s) first, then " ..
-  "on its own new line the exact text '" .. CAVEAT_MARKER .. "', then a short note listing which " ..
-  "answer(s) were guesses and why. If no caveat is needed anywhere, output only the raw answer(s) " ..
-  "with no marker at all."
+  "whatever) and think I should double-check it: still give the raw paste-ready guess in its " ..
+  "answer, then at the very END of your ENTIRE response (after everything else) add a new line " ..
+  "with the exact text '" .. CAVEAT_MARKER .. "', then a short note listing which answer(s) were " ..
+  "guesses and why. Omit this entirely if no caveat is needed anywhere."
 
 -- First-ever call: load background material once, this becomes part of the session.
 -- Edit the file list below to match whatever you actually put in ./context.
@@ -63,6 +83,48 @@ end
 
 local answerWindow = nil
 local busyDot = nil
+local triggerFocusedElement = nil -- snapshotted the instant fn+A is pressed
+
+local SAFE_TEXT_ROLES = {AXTextField = true, AXTextArea = true, AXComboBox = true}
+
+local function captureFocusedElement()
+  local ok, el = pcall(function()
+    return ax.systemWideElement():attributeValue("AXFocusedUIElement")
+  end)
+  if ok then triggerFocusedElement = el else triggerFocusedElement = nil end
+end
+
+-- True only if the field we captured at trigger time is still focused right
+-- now, and it's a normal (non-password) text field. This is the guard against
+-- typing an answer into the wrong place if focus moved while Claude thought.
+local function canAutoFill()
+  if not triggerFocusedElement then return false end
+  local ok, nowFocused = pcall(function()
+    return ax.systemWideElement():attributeValue("AXFocusedUIElement")
+  end)
+  if not ok or not nowFocused or nowFocused ~= triggerFocusedElement then return false end
+
+  local role = triggerFocusedElement:attributeValue("AXRole")
+  local subrole = triggerFocusedElement:attributeValue("AXSubrole")
+  if subrole == "AXSecureTextField" then return false end
+  return SAFE_TEXT_ROLES[role] == true
+end
+
+local function showFillConfirmation()
+  local screen = hs.screen.mainScreen():frame()
+  local size = 10
+  local rect = hs.geometry.rect(screen.x + 12, screen.y + screen.h - size - 12, size, size)
+  local dot = hs.canvas.new(rect)
+  dot[1] = {
+    type = "circle",
+    action = "fill",
+    fillColor = {red = 0.2, green = 0.5, blue = 1, alpha = 0.95}, -- blue = auto-filled
+  }
+  dot:level(hs.canvas.windowLevels.floating)
+  dot:clickActivating(false)
+  dot:show()
+  hs.timer.doAfter(1.2, function() dot:delete() end)
+end
 
 local function hideBusyDot()
   if busyDot then
@@ -100,7 +162,7 @@ local function closeAnswerWindow()
   end
 end
 
-local function showAnswer(text)
+local function showAnswer(displayText, caveatNote, footerNote)
   closeAnswerWindow()
 
   local screen = hs.screen.mainScreen():frame()
@@ -113,22 +175,21 @@ local function showAnswer(text)
     :allowTextEntry(false)
     :level(hs.drawing.windowLevels.floating)
 
-  local answerPart, caveatPart = text:match("^(.-)\n?" .. CAVEAT_MARKER:gsub("%-", "%%-") .. "\n?(.*)$")
-  answerPart = answerPart or text
   local function esc(s) return s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\n", "<br>") end
 
   local caveatHtml = ""
-  if caveatPart and #caveatPart:gsub("%s", "") > 0 then
+  if caveatNote and #caveatNote:gsub("%s", "") > 0 then
     caveatHtml = [[<div style="margin-top:10px;padding-top:10px;border-top:1px solid #444;
-      color:#e0b84d;font-size:12px;">⚠ ]] .. esc(caveatPart) .. [[</div>]]
+      color:#e0b84d;font-size:12px;">⚠ ]] .. esc(caveatNote) .. [[</div>]]
   end
 
   local html = [[
     <html><body style="font-family:-apple-system,sans-serif;font-size:14px;
       padding:14px;background:#1e1e1e;color:#f0f0f0;margin:0;">
-      <div>]] .. esc(answerPart) .. [[</div>
+      <div>]] .. esc(displayText) .. [[</div>
       ]] .. caveatHtml .. [[
-      <div style="margin-top:14px;font-size:11px;color:#888;">Answer copied to clipboard (caveat excluded). Press Esc or F6 to dismiss.</div>
+      <div style="margin-top:14px;font-size:11px;color:#888;">]] .. esc(footerNote or
+        "Copied to clipboard. Press Esc or F6 to dismiss.") .. [[</div>
     </body></html>
   ]]
   answerWindow:html(html)
@@ -141,18 +202,84 @@ local function claudeCall(args, callback)
   task:start()
 end
 
+-- Pulls the caveat note (if any) off the very end of the response. A caveat
+-- always disables auto-fill for that response — a guessed fact should be
+-- eyeballed before it's typed anywhere, never typed in blind.
+local function extractCaveat(text)
+  local pat = "^(.-)\n?" .. CAVEAT_MARKER:gsub("%-", "%%-") .. "\n?(.*)$"
+  local main, note = text:match(pat)
+  if main then
+    return (main:gsub("%s+$", "")), (note:gsub("^%s+", ""):gsub("%s+$", ""))
+  end
+  return (text:gsub("%s+$", "")), nil
+end
+
+-- Splits blank-line-separated "label\nanswer" blocks.
+local function splitBlocks(text)
+  local blocks = {}
+  for block in (text .. "\n\n"):gmatch("(.-)\n\n+") do
+    local trimmed = block:gsub("^%s+", ""):gsub("%s+$", "")
+    if #trimmed > 0 then table.insert(blocks, trimmed) end
+  end
+  if #blocks == 0 and #text:gsub("%s", "") > 0 then table.insert(blocks, text) end
+  return blocks
+end
+
+-- A block is "label line\nanswer text" — answer text may itself be multi-line.
+local function blockAnswerOnly(block)
+  local _, answerBody = block:match("^(.-)\n(.*)$")
+  if not answerBody or #answerBody:gsub("%s", "") == 0 then return block end
+  return answerBody
+end
+
+local function stripPrefix(text, marker)
+  return (text:gsub("^%s*" .. marker:gsub("%-", "%%-") .. "%s*\n?", ""))
+end
+
 local function handleFinalResult(exitCode, stdOut, stdErr)
   hideBusyDot()
   if exitCode ~= 0 or not stdOut or stdOut:match("^%s*$") then
     hs.alert.show("Claude error: " .. (stdErr ~= "" and stdErr or ("exit " .. exitCode)))
     return
   end
-  -- Split off any caveat so only the raw answer (never the caveat note) hits the
-  -- clipboard — a caveat sentence pasted into a real form field would corrupt it.
-  local answerPart = stdOut:match("^(.-)\n?" .. CAVEAT_MARKER:gsub("%-", "%%-") .. "\n?.*$")
-  local clipboardText = (answerPart or stdOut):gsub("%s+$", "")
-  hs.pasteboard.setContents(clipboardText)
-  showAnswer(stdOut)
+
+  local mainText, caveatNote = extractCaveat(stdOut)
+  local hasCaveat = caveatNote ~= nil
+
+  local isFocus = mainText:match("^%s*" .. FOCUS_MARKER:gsub("%-", "%%-")) ~= nil
+  local isMulti = (not isFocus) and mainText:match("^%s*" .. MULTI_MARKER:gsub("%-", "%%-")) ~= nil
+
+  if isFocus then
+    -- Multiple fields visible, but one is focused: type just that one, and
+    -- still show the popup with everything else for manual copy/paste.
+    local body = stripPrefix(mainText, FOCUS_MARKER)
+    local blocks = splitBlocks(body)
+    local typedText = blockAnswerOnly(blocks[1] or body):gsub("%s+$", "")
+    hs.pasteboard.setContents(typedText)
+    if not hasCaveat and canAutoFill() then
+      hs.eventtap.keyStrokes(typedText)
+      showFillConfirmation()
+    end
+    showAnswer(body, caveatNote, "First answer typed + copied to clipboard, rest listed below. Esc/F6 to dismiss.")
+    return
+  end
+
+  if isMulti then
+    -- Several fields, couldn't tell which is focused: manual-only, no typing.
+    local body = stripPrefix(mainText, MULTI_MARKER)
+    hs.pasteboard.setContents(body)
+    showAnswer(body, caveatNote)
+    return
+  end
+
+  -- True single-question screen (e.g. a coding prompt with nothing else).
+  hs.pasteboard.setContents(mainText)
+  if not hasCaveat and canAutoFill() then
+    hs.eventtap.keyStrokes(mainText)
+    showFillConfirmation()
+    return
+  end
+  showAnswer(mainText, caveatNote)
 end
 
 local function runFreshWithContext(sessionId)
@@ -176,6 +303,7 @@ local function runClaudeOnScreenshot()
 end
 
 local function captureAndAsk()
+  captureFocusedElement()
   showBusyDot()
   hs.task.new(SCREENCAPTURE_BIN, function(exitCode, _, stdErr)
     if exitCode ~= 0 then
