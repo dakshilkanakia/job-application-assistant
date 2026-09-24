@@ -54,8 +54,10 @@ so this survives reboots.
 - Screenshots the *entire* main display, not just the focused window.
 - The answer window always appears on your primary display, even with multiple
   monitors.
-- No timeout — a slow response just leaves you waiting with no progress indicator
-  beyond the initial "Reading screen..." flash.
+- No timeout — a slow response just leaves you waiting. The only progress
+  indicator is a small green dot in the bottom-left corner for the first 3
+  seconds; if it takes longer than that, there's no further feedback until the
+  answer (or an error alert) shows up.
 - Session-resume caching is time-sensitive: rapid presses within the same sitting
   are cheap (prompt caching), but long gaps between uses mean an occasional
   full-price context resend even without an explicit re-read.

@@ -62,6 +62,36 @@ local function getOrCreateSessionId()
 end
 
 local answerWindow = nil
+local busyDot = nil
+
+local function hideBusyDot()
+  if busyDot then
+    busyDot:delete()
+    busyDot = nil
+  end
+end
+
+local function showBusyDot()
+  hideBusyDot()
+  local screen = hs.screen.mainScreen():frame()
+  local size = 10
+  local rect = hs.geometry.rect(screen.x + 12, screen.y + screen.h - size - 12, size, size)
+  local dot = hs.canvas.new(rect)
+  dot[1] = {
+    type = "circle",
+    action = "fill",
+    fillColor = {red = 0.2, green = 0.85, blue = 0.3, alpha = 0.95},
+  }
+  dot:level(hs.canvas.windowLevels.floating)
+  dot:clickActivating(false)
+  dot:show()
+  busyDot = dot
+  -- fixed 3s flash, independent of how long the actual task takes; guard against
+  -- a newer dot (from a second press) getting deleted early by this stale timer
+  hs.timer.doAfter(3, function()
+    if busyDot == dot then hideBusyDot() end
+  end)
+end
 
 local function closeAnswerWindow()
   if answerWindow then
@@ -112,6 +142,7 @@ local function claudeCall(args, callback)
 end
 
 local function handleFinalResult(exitCode, stdOut, stdErr)
+  hideBusyDot()
   if exitCode ~= 0 or not stdOut or stdOut:match("^%s*$") then
     hs.alert.show("Claude error: " .. (stdErr ~= "" and stdErr or ("exit " .. exitCode)))
     return
@@ -145,9 +176,10 @@ local function runClaudeOnScreenshot()
 end
 
 local function captureAndAsk()
-  hs.alert.show("Reading screen...", 1)
+  showBusyDot()
   hs.task.new(SCREENCAPTURE_BIN, function(exitCode, _, stdErr)
     if exitCode ~= 0 then
+      hideBusyDot()
       hs.alert.show("Screenshot failed: " .. stdErr)
       return
     end
