@@ -46,6 +46,17 @@ hotkey.
   auto-fill is skipped entirely for that answer and it goes to the popup instead,
   flagged with a ⚠ caveat note, so a guess never gets typed in blind.
 - **Esc** or **F6** dismisses the popup when one's shown.
+- **The popup is invisible on a shared screen.** It's not an `hs.webview` —
+  Hammerspoon launches a small native helper (`helpers/private_popup.swift`,
+  compiled separately, see Setup) that creates its own window with
+  `NSWindow.sharingType = .none`. That flag excludes a window from the same
+  OS-level window-capture API that `screencapture`, Zoom, Google Meet, and
+  Teams all read from — so it renders normally on your own display but never
+  appears in a screen share or screenshot. Verified by screenshotting a running
+  instance and confirming it's absent from the capture, with a control window
+  (same code, flag removed) confirming the test method itself is valid. It does
+  **not** hide anything else — auto-typed answers still land visibly in the
+  real field you're sharing, and this can't help with that.
 
 ## Setup
 
@@ -59,12 +70,18 @@ hotkey.
 4. Drop your own resume/notes into `~/.hammerspoon/context/` (see
    `context/README.md`), and update the file list in `FIRST_PROMPT` in `init.lua` if
    your filenames differ.
-5. Launch Hammerspoon. On first launch it'll ask for:
+5. Compile the private-popup helper (requires Xcode Command Line Tools —
+   `xcode-select --install` if you don't have them):
+   ```
+   mkdir -p ~/.hammerspoon/helpers
+   swiftc helpers/private_popup.swift -o ~/.hammerspoon/helpers/private_popup
+   ```
+6. Launch Hammerspoon. On first launch it'll ask for:
    - **Accessibility** — required for the global hotkey, and for detecting/typing
      into the currently focused field.
    - **Screen Recording** — required for the screenshot (System Settings → Privacy &
      Security → Screen Recording → enable Hammerspoon).
-6. Press **fn+A** on any screen with a question visible.
+7. Press **fn+A** on any screen with a question visible.
 
 Optional: add Hammerspoon to Login Items (System Settings → General → Login Items)
 so this survives reboots.

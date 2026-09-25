@@ -1,2 +1,4 @@
 context/*
 !context/README.md
+helpers/private_popup
+.DS_Store

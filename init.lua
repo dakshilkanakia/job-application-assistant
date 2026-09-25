@@ -1,5 +1,5 @@
 -- fn+A assistant: screenshot -> claude -p (headless, Read-only, resumed session)
--- -> auto-fill or floating answer + clipboard.
+-- -> auto-fill, or a screen-share-invisible popup + clipboard.
 --
 -- Setup: see README.md. Put your own resume/references/notes in ./context and
 -- fix CLAUDE_BIN below (GUI apps often don't inherit your shell's PATH).
@@ -8,11 +8,20 @@ require("hs.ipc")
 hs.ipc.cliInstall() -- lets you test/debug via `hs -c "..."` from Terminal
 
 local ax = require("hs.axuielement")
+local json = require("hs.json")
 
 -- Run `which claude` in Terminal and paste the absolute path here.
 local CLAUDE_BIN = "/usr/local/bin/claude"
 local SCREENCAPTURE_BIN = "/usr/sbin/screencapture"
 local SHOT_PATH = "/tmp/cc_assistant_screen.png"
+
+-- Native helper window (not hs.webview) because it sets NSWindow.sharingType
+-- = .none, which excludes it from the OS-level window-capture API that
+-- Zoom/Meet/Teams/screencapture all consume — so it's invisible on a shared
+-- screen but still visible to you locally. Verified 2026-09-24 by screenshotting
+-- a running instance and confirming it does not appear in the capture.
+local POPUP_HELPER_BIN = hs.configdir .. "/helpers/private_popup"
+local POPUP_PAYLOAD_PATH = "/tmp/cc_assistant_popup_payload.json"
 
 local CONTEXT_DIR = hs.configdir .. "/context"
 local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id.txt"
@@ -157,43 +166,27 @@ end
 
 local function closeAnswerWindow()
   if answerWindow then
-    answerWindow:delete()
+    answerWindow:terminate()
     answerWindow = nil
   end
 end
 
+-- Launches the native private-popup helper (see POPUP_HELPER_BIN) instead of
+-- an hs.webview, so the answer window is invisible on a shared screen.
 local function showAnswer(displayText, caveatNote, footerNote)
   closeAnswerWindow()
 
-  local screen = hs.screen.mainScreen():frame()
-  local w, h = 460, 320
-  local rect = hs.geometry.rect(screen.x + screen.w - w - 24, screen.y + 60, w, h)
+  local payload = json.encode({
+    answer = displayText,
+    caveat = caveatNote,
+    footer = footerNote or "Copied to clipboard. Press Esc or F6 to dismiss.",
+  })
+  local f = io.open(POPUP_PAYLOAD_PATH, "w")
+  f:write(payload)
+  f:close()
 
-  answerWindow = hs.webview.new(rect)
-    :windowStyle({"titled", "closable", "resizable", "utility"})
-    :windowTitle("Claude")
-    :allowTextEntry(false)
-    :level(hs.drawing.windowLevels.floating)
-
-  local function esc(s) return s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"):gsub("\n", "<br>") end
-
-  local caveatHtml = ""
-  if caveatNote and #caveatNote:gsub("%s", "") > 0 then
-    caveatHtml = [[<div style="margin-top:10px;padding-top:10px;border-top:1px solid #444;
-      color:#e0b84d;font-size:12px;">⚠ ]] .. esc(caveatNote) .. [[</div>]]
-  end
-
-  local html = [[
-    <html><body style="font-family:-apple-system,sans-serif;font-size:14px;
-      padding:14px;background:#1e1e1e;color:#f0f0f0;margin:0;">
-      <div>]] .. esc(displayText) .. [[</div>
-      ]] .. caveatHtml .. [[
-      <div style="margin-top:14px;font-size:11px;color:#888;">]] .. esc(footerNote or
-        "Copied to clipboard. Press Esc or F6 to dismiss.") .. [[</div>
-    </body></html>
-  ]]
-  answerWindow:html(html)
-  answerWindow:show()
+  answerWindow = hs.task.new(POPUP_HELPER_BIN, function() end, {POPUP_PAYLOAD_PATH})
+  answerWindow:start()
 end
 
 local function claudeCall(args, callback)
