@@ -1,4 +1,6 @@
 context/*
 !context/README.md
 helpers/private_popup
+helpers/Recorder.app
+helpers/Transcriber.app
 .DS_Store

@@ -1,5 +1,7 @@
 -- fn+A assistant: screenshot -> claude -p (headless, Read-only, resumed session)
 -- -> auto-fill, or a screen-share-invisible popup + clipboard.
+-- fn+Q: mic + system audio -> local transcription -> claude -p (separate session)
+-- -> same private popup.
 --
 -- Setup: see README.md. Put your own resume/references/notes in ./context and
 -- fix CLAUDE_BIN below (GUI apps often don't inherit your shell's PATH).
@@ -25,6 +27,18 @@ local POPUP_PAYLOAD_PATH = "/tmp/cc_assistant_popup_payload.json"
 
 local CONTEXT_DIR = hs.configdir .. "/context"
 local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id.txt"
+
+-- fn+Q: meeting-transcription assistant. Records mic + system audio (via a
+-- native ScreenCaptureKit/AVAudioEngine helper), transcribes locally (Apple's
+-- on-device Speech framework, another native helper — Claude itself can't
+-- ingest audio), then asks Claude the same way as fn+A, in a separate session.
+local RECORDER_BIN = hs.configdir .. "/helpers/Recorder.app/Contents/MacOS/recorder"
+local TRANSCRIBER_APP = hs.configdir .. "/helpers/Transcriber.app"
+local MIC_AUDIO_PATH = "/tmp/cc_assistant_mic.wav"
+local SYS_AUDIO_PATH = "/tmp/cc_assistant_sys.m4a"
+local FLASH_PAYLOAD_PATH = "/tmp/cc_assistant_flash_payload.json"
+local MEETING_SESSION_ID_PATH = CONTEXT_DIR .. "/meeting_session_id.txt"
+local RECORD_MAX_SECONDS = 120 -- safety auto-stop if you forget to press fn+Q again
 
 local CAVEAT_MARKER = "---CAVEAT---"
 local MULTI_MARKER = "---MULTI---"
@@ -74,8 +88,8 @@ local RESUME_PROMPT = "New screenshot at " .. SHOT_PATH .. " (same background in
   "have from earlier in this session, don't re-read the resume/references/behavioural files). " ..
   ANSWER_INSTRUCTIONS
 
-local function getOrCreateSessionId()
-  local f = io.open(SESSION_ID_PATH, "r")
+local function getOrCreateSessionIdAt(path)
+  local f = io.open(path, "r")
   if f then
     local id = f:read("*l")
     f:close()
@@ -84,10 +98,43 @@ local function getOrCreateSessionId()
   local handle = io.popen("uuidgen")
   local id = handle:read("*l")
   handle:close()
-  local out = io.open(SESSION_ID_PATH, "w")
+  local out = io.open(path, "w")
   out:write(id)
   out:close()
   return id, true
+end
+
+local function getOrCreateSessionId()
+  return getOrCreateSessionIdAt(SESSION_ID_PATH)
+end
+
+local MEETING_INSTRUCTIONS =
+  "You just heard some live audio from a meeting/conversation, transcribed below (may include " ..
+  "what I said and what others said via system audio, or just one of those if the other was " ..
+  "silent). Respond helpfully to whatever was said or asked. If it's a direct question, answer " ..
+  "it — use MY real background where relevant (specific projects, numbers, technologies), but " ..
+  "also feel free to reason or improvise using general knowledge for anything not covered by my " ..
+  "background material — don't refuse or hedge just because something isn't about me " ..
+  "specifically. There's also a screenshot of whatever was on screen at that moment for extra " ..
+  "context (e.g. shared slides, a document, a coding problem) — use it if it's relevant to the " ..
+  "conversation, ignore it if not. Keep your response concise and to the point, no preamble, no " ..
+  "'Here is...'. If you have to guess at something uncertain, still give your best answer, then " ..
+  "at the very end add a new line with the exact text '" .. CAVEAT_MARKER .. "', then a short " ..
+  "note explaining the uncertainty. Omit that marker entirely if there's no real uncertainty."
+
+local function buildMeetingFirstPrompt(transcript)
+  return "You are helping me during a live meeting/conversation, repeatedly, over a long " ..
+    "session. First read my background material: " .. CONTEXT_DIR .. "/resume.pdf, " ..
+    CONTEXT_DIR .. "/references.pdf, and " .. CONTEXT_DIR .. "/behavioural.txt. Remember this " ..
+    "for later in this same session — don't re-read these files unless I explicitly ask. Also " ..
+    "read the screenshot at " .. SHOT_PATH .. ". Transcript:\n\n" .. transcript .. "\n\n" ..
+    MEETING_INSTRUCTIONS
+end
+
+local function buildMeetingResumePrompt(transcript)
+  return "New audio transcript from this same meeting session (same background info you " ..
+    "already have, don't re-read the resume/references/behavioural files). Also read the new " ..
+    "screenshot at " .. SHOT_PATH .. ". Transcript:\n\n" .. transcript .. "\n\n" .. MEETING_INSTRUCTIONS
 end
 
 local answerWindow = nil
@@ -308,10 +355,127 @@ local function captureAndAsk()
   end, {"-x", SHOT_PATH}):start()
 end
 
+-- fn+Q: meeting-transcription toggle -------------------------------------
+
+local function showStateFlash(text)
+  local payload = json.encode({answer = text, footer = "", autoCloseSeconds = 3})
+  local f = io.open(FLASH_PAYLOAD_PATH, "w")
+  f:write(payload)
+  f:close()
+  hs.task.new(POPUP_HELPER_BIN, function() end, {FLASH_PAYLOAD_PATH}):start()
+end
+
+local function meetingHandleFinalResult(exitCode, stdOut, stdErr)
+  if exitCode ~= 0 or not stdOut or stdOut:match("^%s*$") then
+    hs.alert.show("Claude error: " .. (stdErr ~= "" and stdErr or ("exit " .. exitCode)))
+    return
+  end
+  local mainText, caveatNote = extractCaveat(stdOut)
+  hs.pasteboard.setContents(mainText)
+  showAnswer(mainText, caveatNote)
+end
+
+local function meetingClaudeCall(transcript)
+  local sessionId, isNew = getOrCreateSessionIdAt(MEETING_SESSION_ID_PATH)
+
+  local function runFresh()
+    claudeCall(
+      {"-p", buildMeetingFirstPrompt(transcript), "--allowedTools", "Read", "--session-id", sessionId},
+      meetingHandleFinalResult
+    )
+  end
+
+  if isNew then
+    runFresh()
+    return
+  end
+  claudeCall(
+    {"-p", buildMeetingResumePrompt(transcript), "--allowedTools", "Read", "--resume", sessionId},
+    function(exitCode, stdOut, stdErr)
+      if exitCode ~= 0 and stdErr and stdErr:match("No conversation found") then
+        runFresh()
+        return
+      end
+      meetingHandleFinalResult(exitCode, stdOut, stdErr)
+    end
+  )
+end
+
+-- Launched via `open -n -W` (not a direct hs.task exec of the binary) because
+-- Speech framework's Info.plist usage-description check only resolves
+-- correctly when the process goes through normal LaunchServices app
+-- resolution; a raw direct exec of the binary inside the bundle crashes with
+-- a spurious "missing NSSpeechRecognitionUsageDescription" even though the
+-- key is present and already authorized. `-W` makes `open` block until the
+-- app quits; the transcriber writes its result to outPath since stdout from
+-- an `open`-launched app isn't piped back to us.
+local function transcribeFile(path, callback)
+  local outPath = path .. ".txt"
+  os.remove(outPath)
+  hs.task.new("/usr/bin/open", function(exitCode)
+    local text = ""
+    local f = io.open(outPath, "r")
+    if f then
+      text = f:read("*a") or ""
+      f:close()
+    end
+    callback(text:gsub("%s+$", ""))
+  end, {"-n", "-W", TRANSCRIBER_APP, "--args", path, outPath}):start()
+end
+
+local function afterRecordingStopped()
+  hs.task.new(SCREENCAPTURE_BIN, function()
+    local micText, sysText = nil, nil
+    local function maybeProceed()
+      if micText == nil or sysText == nil then return end
+      local transcript = ""
+      if micText ~= "" then transcript = transcript .. "Me: " .. micText .. "\n" end
+      if sysText ~= "" then transcript = transcript .. "Others / system audio: " .. sysText .. "\n" end
+      if transcript == "" then
+        hs.alert.show("No speech detected in that recording.")
+        return
+      end
+      meetingClaudeCall(transcript)
+    end
+    transcribeFile(MIC_AUDIO_PATH, function(t) micText = t; maybeProceed() end)
+    transcribeFile(SYS_AUDIO_PATH, function(t) sysText = t; maybeProceed() end)
+  end, {"-x", SHOT_PATH}):start()
+end
+
+local isRecording = false
+local recorderTask = nil
+local recordingSafetyTimer = nil
+
+local function stopRecording()
+  if not isRecording then return end
+  isRecording = false
+  if recordingSafetyTimer then
+    recordingSafetyTimer:stop()
+    recordingSafetyTimer = nil
+  end
+  showStateFlash("🟠 OFF")
+  if recorderTask then
+    recorderTask:terminate()
+    recorderTask = nil
+  end
+end
+
+local function startRecording()
+  if isRecording then return end
+  isRecording = true
+  showStateFlash("🟠 ON")
+  recorderTask = hs.task.new(RECORDER_BIN, function()
+    afterRecordingStopped()
+  end, {MIC_AUDIO_PATH, SYS_AUDIO_PATH})
+  recorderTask:start()
+  recordingSafetyTimer = hs.timer.doAfter(RECORD_MAX_SECONDS, stopRecording)
+end
+
 -- fn+A trigger. hs.hotkey.bind's modifier list doesn't reliably support "fn"
 -- across Hammerspoon versions (it's not a real Carbon hotkey modifier), so we
 -- watch raw keyDown events instead and check the fn flag ourselves.
 local TRIGGER_KEYCODE = hs.keycodes.map["a"]
+local RECORD_KEYCODE = hs.keycodes.map["q"]
 local ESCAPE_KEYCODE = hs.keycodes.map["escape"]
 
 fnF5Watcher = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
@@ -320,6 +484,11 @@ fnF5Watcher = hs.eventtap.new({hs.eventtap.event.types.keyDown}, function(event)
   if keyCode == TRIGGER_KEYCODE and event:getFlags().fn then
     captureAndAsk()
     return true -- swallow the event, don't pass it through
+  end
+
+  if keyCode == RECORD_KEYCODE and event:getFlags().fn then
+    if isRecording then stopRecording() else startRecording() end
+    return true
   end
 
   -- Only swallow Escape while the popup is actually open, so it behaves

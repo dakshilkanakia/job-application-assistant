@@ -2,17 +2,22 @@
 
 # Job Application Assistant
 
-Trigger: **fn+A**.
+Two triggers: **fn+A** (screen) and **fn+Q** (voice).
 
-A tiny macOS background tool: press **fn+A** anywhere, it screenshots your screen,
-hands it to a local [Claude Code](https://claude.com/claude-code) session along with
-your own background material (resume, notes, whatever), and either **types the
-answer directly into the field you're in** or pops it up for you to read/copy —
-always backed up to your clipboard either way.
+A tiny macOS background tool built on [Hammerspoon](https://www.hammerspoon.org/) and
+[Claude Code](https://claude.com/claude-code), backed by your own resume/notes.
 
-Built for filling out job applications faster: multiple-choice questions, free-text
-fields, "tell us about a time you..." — point your screen at the question, hit the
-hotkey.
+- **fn+A** — screenshots your screen, and either **types the answer directly into
+  the field you're in** or pops it up for you to read/copy — always backed up to
+  your clipboard either way. Built for filling out job applications faster:
+  multiple-choice questions, free-text fields, "tell us about a time you..." —
+  point your screen at the question, hit the hotkey.
+- **fn+Q** — toggles recording your mic *and* whatever's playing through your
+  speakers (a call, a video) at once, transcribes it locally, and asks Claude —
+  for catching a verbal question in a live meeting/interview without manually
+  recording and transcribing it yourself afterward.
+
+Both land in the same **screen-share-invisible** popup.
 
 ## How it works
 
@@ -58,6 +63,44 @@ hotkey.
   **not** hide anything else — auto-typed answers still land visibly in the
   real field you're sharing, and this can't help with that.
 
+## How fn+Q works (meeting transcription)
+
+Claude itself can't listen to audio — there's no audio-understanding path in this
+pipeline. So the real chain is: **capture → transcribe to text locally → hand that
+text to Claude exactly like fn+A hands it a screenshot.**
+
+- **Toggle, not push-to-talk**: press fn+Q to start, press it again to stop.
+  Pushing-to-talk would mean holding the key down for however long the question
+  runs, which is impractical past a few seconds.
+- **Two native helpers do the real work** (Hammerspoon/Lua can't touch either of
+  these APIs directly):
+  - `helpers/recorder.swift` — mic via `AVAudioEngine`, system audio (whatever's
+    playing — the other person's voice on a call, a video) via `ScreenCaptureKit`'s
+    audio capture, both to separate files, running until it receives `SIGTERM`.
+  - `helpers/transcribe.swift` — feeds a finished audio file to Apple's on-device
+    `Speech` framework (free, offline, no API key) and writes the transcript to a
+    file.
+- **A screenshot is taken the moment you stop recording** and sent alongside the
+  transcript every time — rather than trying to detect whether something on
+  screen is actually relevant to what was said, Claude just gets both and decides
+  what matters. Simpler and more robust than building real detection.
+- **A separate Claude session from fn+A** (`context/meeting_session_id.txt`),
+  since the instructions are different (respond to a conversation, not fill a
+  form field) — same background files, same private popup, own conversation
+  thread.
+- **No auto-fill in this mode** — it always shows the popup, never types into
+  whatever's focused. Filling a form field and responding to a meeting question
+  are different enough situations that blind auto-typing felt like the wrong
+  default here.
+- **2-minute safety auto-stop** in case you forget to press fn+Q again.
+- **Only captures forward from the moment you press it** — it can't retroactively
+  recover what was said just before you reacted, since nothing is buffered in the
+  background. Getting that would need continuous rolling-buffer recording running
+  at all times, a meaningfully bigger privacy footprint, deliberately not built.
+- A short **orange dot** flashes (screen-share-invisible, like the answer popup)
+  when recording starts and again when it stops, so you have on-screen
+  confirmation of which state you're in.
+
 ## Setup
 
 1. Install [Hammerspoon](https://www.hammerspoon.org/) (`brew install --cask hammerspoon`)
@@ -76,15 +119,63 @@ hotkey.
    mkdir -p ~/.hammerspoon/helpers
    swiftc helpers/private_popup.swift -o ~/.hammerspoon/helpers/private_popup
    ```
-6. Launch Hammerspoon. On first launch it'll ask for:
+6. **fn+Q only** — build the recorder and transcriber as minimal signed `.app`
+   bundles (a bare compiled binary hits a hard permission wall for these two
+   specific APIs; a real bundle with an `Info.plist` is required):
+   ```
+   mkdir -p ~/.hammerspoon/helpers/Recorder.app/Contents/MacOS
+   swiftc helpers/recorder.swift -o ~/.hammerspoon/helpers/Recorder.app/Contents/MacOS/recorder
+   cat > ~/.hammerspoon/helpers/Recorder.app/Contents/Info.plist <<'EOF'
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+     <key>CFBundleExecutable</key><string>recorder</string>
+     <key>CFBundleIdentifier</key><string>com.yourname.jobassistant.recorder</string>
+     <key>CFBundlePackageType</key><string>APPL</string>
+     <key>NSMicrophoneUsageDescription</key><string>Records mic audio locally to transcribe.</string>
+   </dict></plist>
+   EOF
+   codesign -s - --force --deep ~/.hammerspoon/helpers/Recorder.app
+
+   mkdir -p ~/.hammerspoon/helpers/Transcriber.app/Contents/MacOS
+   swiftc helpers/transcribe.swift -o ~/.hammerspoon/helpers/Transcriber.app/Contents/MacOS/transcribe
+   cat > ~/.hammerspoon/helpers/Transcriber.app/Contents/Info.plist <<'EOF'
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+     <key>CFBundleExecutable</key><string>transcribe</string>
+     <key>CFBundleIdentifier</key><string>com.yourname.jobassistant.transcriber</string>
+     <key>CFBundlePackageType</key><string>APPL</string>
+     <key>NSSpeechRecognitionUsageDescription</key><string>Transcribes recorded audio locally.</string>
+   </dict></plist>
+   EOF
+   codesign -s - --force --deep ~/.hammerspoon/helpers/Transcriber.app
+   ```
+   Use your own reverse-DNS-style `CFBundleIdentifier`s (anything unique), not
+   the literal placeholder above.
+7. Launch Hammerspoon. On first launch it'll ask for:
    - **Accessibility** — required for the global hotkey, and for detecting/typing
      into the currently focused field.
-   - **Screen Recording** — required for the screenshot (System Settings → Privacy &
-     Security → Screen Recording → enable Hammerspoon).
-7. Press **fn+A** on any screen with a question visible.
+   - **Screen Recording** — required for the screenshot, and (fn+Q) system audio
+     capture (System Settings → Privacy & Security → Screen Recording → enable
+     Hammerspoon).
+   - **Microphone** (fn+Q) and **Speech Recognition** (fn+Q) — each asks the
+     first time you actually use fn+Q, as a normal system dialog. Click Allow.
+8. Press **fn+A** on any screen with a question visible, or **fn+Q** to record
+   and transcribe a moment of audio.
 
 Optional: add Hammerspoon to Login Items (System Settings → General → Login Items)
 so this survives reboots.
+
+**A packaging gotcha worth knowing if you modify this**: the transcriber must be
+launched via `open -n -W AppBundle --args ...` (as `init.lua` already does), never
+by executing the binary inside the bundle directly. Apple's Speech framework only
+correctly resolves the bundle's `Info.plist` (specifically the usage-description
+key it requires) when the process goes through normal `LaunchServices` app
+resolution — a direct exec bypasses that and crashes with a spurious "missing
+usage description" even though the key is right there and already authorized. The
+recorder doesn't have this problem (different permission-check mechanism
+underneath) and can be launched directly.
 
 ## Known limitations
 
@@ -108,6 +199,16 @@ so this survives reboots.
 - Session-resume caching is time-sensitive: rapid presses within the same sitting
   are cheap (prompt caching), but long gaps between uses mean an occasional
   full-price context resend even without an explicit re-read.
+- **fn+Q**: no auto-fill — always shows the popup, never types an answer in.
+- **fn+Q**: only captures from the moment you press it forward, never
+  retroactively — see "How fn+Q works" above.
+- **fn+Q**: transcription quality depends on Apple's on-device Speech model for
+  your locale/language and on audio quality — cross-talk, heavy accents, or a
+  quiet/far-field mic will transcribe worse than clear solo speech.
+- **fn+Q**: ad-hoc code signing (`codesign -s -`) isn't a stable identity the way
+  a real Developer ID certificate is — if you recompile `recorder`/`transcribe`
+  after granting permissions, macOS *may* ask again since the signature hash
+  changed. Not usually an issue once you've built it and stopped touching it.
 
 ## License
 
