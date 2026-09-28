@@ -357,8 +357,23 @@ end
 
 -- fn+Q: meeting-transcription toggle -------------------------------------
 
-local function showStateFlash(text)
-  local payload = json.encode({answer = text, footer = "", autoCloseSeconds = 3})
+-- Same plain-dot style as the green busy-dot/blue fill-confirmation canvas
+-- indicators, just rendered by the private-popup helper instead of hs.canvas
+-- so it's also invisible on a shared screen (recording state during a live
+-- call is exactly the kind of thing that shouldn't show up to viewers).
+local function showStateFlash(color)
+  -- Same top-down coordinates as showBusyDot, passed straight through so the
+  -- Swift helper doesn't independently recompute screen geometry (which is
+  -- what caused it to drift from the green dot's actual position before).
+  local screen = hs.screen.mainScreen():frame()
+  local size = 10
+  local payload = json.encode({
+    dot = true,
+    color = color,
+    autoCloseSeconds = 3,
+    x = screen.x + 12,
+    y = screen.y + screen.h - size - 12,
+  })
   local f = io.open(FLASH_PAYLOAD_PATH, "w")
   f:write(payload)
   f:close()
@@ -453,7 +468,7 @@ local function stopRecording()
     recordingSafetyTimer:stop()
     recordingSafetyTimer = nil
   end
-  showStateFlash("🟠 OFF")
+  showStateFlash({1, 0.55, 0})
   if recorderTask then
     recorderTask:terminate()
     recorderTask = nil
@@ -463,7 +478,7 @@ end
 local function startRecording()
   if isRecording then return end
   isRecording = true
-  showStateFlash("🟠 ON")
+  showStateFlash({1, 0.55, 0})
   recorderTask = hs.task.new(RECORDER_BIN, function()
     afterRecordingStopped()
   end, {MIC_AUDIO_PATH, SYS_AUDIO_PATH})

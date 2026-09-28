@@ -97,9 +97,11 @@ text to Claude exactly like fn+A hands it a screenshot.**
   recover what was said just before you reacted, since nothing is buffered in the
   background. Getting that would need continuous rolling-buffer recording running
   at all times, a meaningfully bigger privacy footprint, deliberately not built.
-- A short **orange dot** flashes (screen-share-invisible, like the answer popup)
-  when recording starts and again when it stops, so you have on-screen
-  confirmation of which state you're in.
+- A short **orange dot** flashes when recording starts and again when it stops
+  — same plain-circle style and exact screen position as the green/blue
+  progress dots from fn+A (bottom-left, coordinates computed once in Lua and
+  passed straight to the native helper so it can't drift out of alignment),
+  just also screen-share-invisible like the answer popup.
 
 ## Setup
 
@@ -133,6 +135,7 @@ text to Claude exactly like fn+A hands it a screenshot.**
      <key>CFBundleIdentifier</key><string>com.yourname.jobassistant.recorder</string>
      <key>CFBundlePackageType</key><string>APPL</string>
      <key>NSMicrophoneUsageDescription</key><string>Records mic audio locally to transcribe.</string>
+     <key>LSUIElement</key><true/>
    </dict></plist>
    EOF
    codesign -s - --force --deep ~/.hammerspoon/helpers/Recorder.app
@@ -147,12 +150,16 @@ text to Claude exactly like fn+A hands it a screenshot.**
      <key>CFBundleIdentifier</key><string>com.yourname.jobassistant.transcriber</string>
      <key>CFBundlePackageType</key><string>APPL</string>
      <key>NSSpeechRecognitionUsageDescription</key><string>Transcribes recorded audio locally.</string>
+     <key>LSUIElement</key><true/>
    </dict></plist>
    EOF
    codesign -s - --force --deep ~/.hammerspoon/helpers/Transcriber.app
    ```
    Use your own reverse-DNS-style `CFBundleIdentifier`s (anything unique), not
-   the literal placeholder above.
+   the literal placeholder above. `LSUIElement` stops them from bouncing in the
+   Dock like a normal app on launch — without it, macOS treats any `.app`
+   bundle as a regular foreground app by default, whether or not the process
+   inside actually has a UI.
 7. Launch Hammerspoon. On first launch it'll ask for:
    - **Accessibility** — required for the global hotkey, and for detecting/typing
      into the currently focused field.

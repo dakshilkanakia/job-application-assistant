@@ -11,14 +11,62 @@ let caveatText = json["caveat"] as? String
 let footerText = (json["footer"] as? String) ?? "Copied to clipboard. Press Esc or F6 to dismiss."
 let hidden = (json["hidden"] as? Bool) ?? true
 let autoCloseSeconds = json["autoCloseSeconds"] as? Double
-let compact = autoCloseSeconds != nil
+let isDot = (json["dot"] as? Bool) ?? false
 
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
+if isDot {
+    // Plain colored circle, bottom-left, same size/position as the green
+    // busy-dot canvas indicator — just invisible on a shared screen too.
+    let colorArr = json["color"] as? [Double] ?? [1, 1, 1]
+    let screen = NSScreen.main!.frame
+    let size: CGFloat = 10
+    // x/y (if provided) are Hammerspoon's top-down coordinates for this same
+    // dot's position, computed once in Lua and passed straight through so
+    // this never independently drifts from where the green dot actually is.
+    let winX: CGFloat
+    let winY: CGFloat
+    if let hsX = json["x"] as? Double, let hsY = json["y"] as? Double {
+        winX = CGFloat(hsX)
+        winY = screen.height - CGFloat(hsY) - size
+    } else {
+        winX = screen.minX + 12
+        winY = screen.minY + 12
+    }
+    let dotWindow = NSWindow(
+        contentRect: NSRect(x: winX, y: winY, width: size, height: size),
+        styleMask: [.borderless],
+        backing: .buffered, defer: false
+    )
+    dotWindow.isOpaque = false
+    dotWindow.backgroundColor = .clear
+    dotWindow.level = .floating
+    dotWindow.hasShadow = false
+    dotWindow.ignoresMouseEvents = true
+    if hidden { dotWindow.sharingType = .none }
+
+    let dotView = NSView(frame: NSRect(x: 0, y: 0, width: size, height: size))
+    dotView.wantsLayer = true
+    dotView.layer?.backgroundColor = NSColor(
+        calibratedRed: colorArr[0], green: colorArr[1], blue: colorArr[2], alpha: 0.95
+    ).cgColor
+    dotView.layer?.cornerRadius = size / 2
+    dotWindow.contentView = dotView
+
+    dotWindow.orderFrontRegardless()
+
+    signal(SIGTERM) { _ in NSApp.terminate(nil) }
+    if let seconds = autoCloseSeconds {
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { NSApp.terminate(nil) }
+    }
+    app.run()
+    exit(0)
+}
+
 let screen = NSScreen.main!.frame
-let w: CGFloat = compact ? 220 : 460
-let h: CGFloat = compact ? 50 : 320
+let w: CGFloat = 460
+let h: CGFloat = 320
 let panel = NSPanel(
     contentRect: NSRect(x: screen.maxX - w - 24, y: screen.maxY - h - 80, width: w, height: h),
     styleMask: [.nonactivatingPanel, .titled, .closable, .utilityWindow],
