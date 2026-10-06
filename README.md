@@ -4,8 +4,10 @@
 
 Two triggers: **fn+A** (screen) and **fn+Q** (voice).
 
-A tiny macOS background tool built on [Hammerspoon](https://www.hammerspoon.org/) and
-[Claude Code](https://claude.com/claude-code), backed by your own resume/notes.
+A tiny macOS background tool built on [Hammerspoon](https://www.hammerspoon.org/), backed
+by your own resume/notes, answered by [Claude Code](https://claude.com/claude-code) —
+or [Codex CLI](https://github.com/openai/codex) as a manual fallback if your Claude
+subscription lapses. See "Claude or Codex" below.
 
 - **fn+A** — screenshots your screen, and either **types the answer directly into
   the field you're in** or pops it up for you to read/copy — always backed up to
@@ -62,6 +64,11 @@ Both land in the same **screen-share-invisible** popup.
   (same code, flag removed) confirming the test method itself is valid. It does
   **not** hide anything else — auto-typed answers still land visibly in the
   real field you're sharing, and this can't help with that.
+- The popup is **scrollable** (for long answers), **resizable** (drag an
+  edge/corner), and its text is **selectable** — click-drag to select,
+  Cmd+C to copy. That last one needs its own minimal Edit menu internally;
+  Cocoa routes Cmd+C through a menu key-equivalent, not raw key capture, so
+  text being selectable alone isn't enough without it.
 
 ## How fn+Q works (meeting transcription)
 
@@ -103,6 +110,45 @@ text to Claude exactly like fn+A hands it a screenshot.**
   passed straight to the native helper so it can't drift out of alignment),
   just also screen-share-invisible like the answer popup.
 
+## Claude or Codex
+
+One line at the top of `init.lua` — `ACTIVE_PROVIDER = "claude"` or `"codex"` —
+picks which CLI agent actually answers. It's a manual switch, not automatic
+failover (detecting "Claude's unavailable" reliably across different failure
+modes — expired auth, quota, network — was more complexity than it was worth
+for a personal tool; flip it yourself when needed).
+
+Everything else — the prompts, the FOCUS/MULTI/CAVEAT protocol, the popup, the
+auto-fill safety checks — is 100% shared between both providers. Only the
+low-level invocation differs (`invokeClaude`/`invokeCodex` in `init.lua`), and
+the two behave differently under the hood in ways worth knowing:
+
+- **Claude** reads files (your resume, the screenshot) through its own `Read`
+  tool, restricted via `--allowedTools Read` — it can't do anything else.
+  **Codex** keeps general read-only shell access even in its safest mode
+  (`-s read-only`): it reads the screenshot via a real image attachment
+  (`-i`), but for PDFs it recognizes they're not real images and instead runs
+  an actual shell command (`pdftotext`) to extract the text itself. Different
+  security model — both end up read-only, but Codex's path depends on
+  `pdftotext` (or similar) being installed, where Claude's doesn't need
+  anything external.
+- **Session IDs**: Claude lets you choose the UUID up front (`--session-id`).
+  Codex generates its own and only reveals it in the response's `session id:`
+  header line — `init.lua` parses that out and persists it the same way.
+  Each provider gets its own session file
+  (`context/session_id_claude.txt` / `context/session_id_codex.txt`, same
+  split for the fn+Q meeting session) so switching providers never tries to
+  resume a session the other one won't recognize.
+- **Self-healing on a dead session** works for both, just on different error
+  text: Claude's `"No conversation found"` vs. Codex's `"no rollout found"`.
+  If a session's gone, it silently re-establishes context once instead of
+  failing.
+- Codex needs `--skip-git-repo-check` (this isn't a git repo at runtime) and
+  won't accept a mixed-in `-s` flag on `exec resume` — the sandbox setting
+  from the original session just carries over automatically.
+- Setup: install Codex CLI and run `codex login` once (uses your ChatGPT
+  account) before flipping `ACTIVE_PROVIDER` to `"codex"`.
+
 ## Setup
 
 1. Install [Hammerspoon](https://www.hammerspoon.org/) (`brew install --cask hammerspoon`)
@@ -111,7 +157,10 @@ text to Claude exactly like fn+A hands it a screenshot.**
 2. Copy `init.lua` to `~/.hammerspoon/init.lua`.
 3. Find your Claude Code binary path (`which claude`) and set `CLAUDE_BIN` at the top
    of `init.lua` to that absolute path — GUI apps like Hammerspoon don't inherit your
-   shell's `PATH`, so a bare `"claude"` usually won't resolve.
+   shell's `PATH`, so a bare `"claude"` usually won't resolve. **If you also want the
+   Codex fallback**: install [Codex CLI](https://github.com/openai/codex), run
+   `codex login` once, and confirm `CODEX_BIN` (`which codex`) is correct too — you
+   don't need to touch `ACTIVE_PROVIDER` unless/until you actually want to switch.
 4. Drop your own resume/notes into `~/.hammerspoon/context/` (see
    `context/README.md`), and update the file list in `FIRST_PROMPT` in `init.lua` if
    your filenames differ.
@@ -216,6 +265,15 @@ underneath) and can be launched directly.
   a real Developer ID certificate is — if you recompile `recorder`/`transcribe`
   after granting permissions, macOS *may* ask again since the signature hash
   changed. Not usually an issue once you've built it and stopped touching it.
+- **Codex mode**: reading your resume/references PDFs depends on `pdftotext`
+  (or Codex finding some other way to extract text) being available on your
+  machine — Claude's built-in Read tool has no such dependency.
+- **Codex mode**: same prompts, different model — the FOCUS/MULTI/CAVEAT
+  formatting protocol was tuned against Claude. Codex generally follows it,
+  but hasn't been stress-tested the way the Claude path has; worth spot-
+  checking its output format occasionally, especially right after switching.
+- Provider switching is **manual only** — no automatic failover when Claude's
+  unavailable. See "Claude or Codex" above for why.
 
 ## License
 

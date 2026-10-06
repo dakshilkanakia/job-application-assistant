@@ -16,6 +16,21 @@ let isDot = (json["dot"] as? Bool) ?? false
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 
+// Cmd+C only works because of this: in Cocoa, keyboard shortcuts like Copy
+// route through the app's menu key-equivalents, not raw key interception —
+// `isSelectable = true` on the text fields enables drag-to-select, but
+// without an actual Edit menu here, Cmd+C has nothing to bind to and silently
+// does nothing even though the text is selectable. An accessory-policy app
+// has no *visible* menu bar, but the key-equivalent routing still works.
+let mainMenu = NSMenu()
+let editMenuItem = NSMenuItem()
+mainMenu.addItem(editMenuItem)
+let editMenu = NSMenu(title: "Edit")
+editMenuItem.submenu = editMenu
+editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+app.mainMenu = mainMenu
+
 if isDot {
     // Plain colored circle, bottom-left, same size/position as the green
     // busy-dot canvas indicator — just invisible on a shared screen too.
@@ -69,7 +84,7 @@ let w: CGFloat = 460
 let h: CGFloat = 320
 let panel = NSPanel(
     contentRect: NSRect(x: screen.maxX - w - 24, y: screen.maxY - h - 80, width: w, height: h),
-    styleMask: [.nonactivatingPanel, .titled, .closable, .utilityWindow],
+    styleMask: [.nonactivatingPanel, .titled, .closable, .utilityWindow, .resizable],
     backing: .buffered, defer: false
 )
 panel.level = .floating
@@ -94,6 +109,7 @@ func makeLabel(_ text: String, size: CGFloat, color: NSColor, bold: Bool = false
     label.backgroundColor = .clear
     label.isBezeled = false
     label.isEditable = false
+    label.isSelectable = true
     label.translatesAutoresizingMaskIntoConstraints = false
     return label
 }

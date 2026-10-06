@@ -1,6 +1,6 @@
--- fn+A assistant: screenshot -> claude -p (headless, Read-only, resumed session)
+-- fn+A assistant: screenshot -> claude/codex (headless, Read-only, resumed session)
 -- -> auto-fill, or a screen-share-invisible popup + clipboard.
--- fn+Q: mic + system audio -> local transcription -> claude -p (separate session)
+-- fn+Q: mic + system audio -> local transcription -> claude/codex (separate session)
 -- -> same private popup.
 --
 -- Setup: see README.md. Put your own resume/references/notes in ./context and
@@ -12,8 +12,16 @@ hs.ipc.cliInstall() -- lets you test/debug via `hs -c "..."` from Terminal
 local ax = require("hs.axuielement")
 local json = require("hs.json")
 
+-- "claude" or "codex" — which CLI agent actually answers. Manual switch for
+-- now (Claude subscription may lapse; Codex is the fallback). Everything else
+-- (prompts, FOCUS/MULTI/CAVEAT protocol, popup, auto-fill) is shared between
+-- both — only the low-level invocation differs. See invokeClaude/invokeCodex.
+local ACTIVE_PROVIDER = "claude"
+
 -- Run `which claude` in Terminal and paste the absolute path here.
 local CLAUDE_BIN = "/usr/local/bin/claude"
+local CODEX_BIN = "/usr/local/bin/codex"
+local CODEX_OUT_PATH = "/tmp/cc_assistant_codex_out.txt"
 local SCREENCAPTURE_BIN = "/usr/sbin/screencapture"
 local SHOT_PATH = "/tmp/cc_assistant_screen.png"
 
@@ -26,7 +34,10 @@ local POPUP_HELPER_BIN = hs.configdir .. "/helpers/private_popup"
 local POPUP_PAYLOAD_PATH = "/tmp/cc_assistant_popup_payload.json"
 
 local CONTEXT_DIR = hs.configdir .. "/context"
-local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id.txt"
+-- Provider-namespaced: a Claude session id is meaningless to Codex and vice
+-- versa, so switching ACTIVE_PROVIDER just starts a fresh session for that
+-- provider instead of erroring on a mismatched id.
+local SESSION_ID_PATH = CONTEXT_DIR .. "/session_id_" .. ACTIVE_PROVIDER .. ".txt"
 
 -- fn+Q: meeting-transcription assistant. Records mic + system audio (via a
 -- native ScreenCaptureKit/AVAudioEngine helper), transcribes locally (Apple's
@@ -37,7 +48,7 @@ local TRANSCRIBER_APP = hs.configdir .. "/helpers/Transcriber.app"
 local MIC_AUDIO_PATH = "/tmp/cc_assistant_mic.wav"
 local SYS_AUDIO_PATH = "/tmp/cc_assistant_sys.m4a"
 local FLASH_PAYLOAD_PATH = "/tmp/cc_assistant_flash_payload.json"
-local MEETING_SESSION_ID_PATH = CONTEXT_DIR .. "/meeting_session_id.txt"
+local MEETING_SESSION_ID_PATH = CONTEXT_DIR .. "/meeting_session_id_" .. ACTIVE_PROVIDER .. ".txt"
 local RECORD_MAX_SECONDS = 120 -- safety auto-stop if you forget to press fn+Q again
 
 local CAVEAT_MARKER = "---CAVEAT---"
@@ -87,26 +98,6 @@ local FIRST_PROMPT = "You are helping me quickly while I fill out job applicatio
 local RESUME_PROMPT = "New screenshot at " .. SHOT_PATH .. " (same background info you already " ..
   "have from earlier in this session, don't re-read the resume/references/behavioural files). " ..
   ANSWER_INSTRUCTIONS
-
-local function getOrCreateSessionIdAt(path)
-  local f = io.open(path, "r")
-  if f then
-    local id = f:read("*l")
-    f:close()
-    if id and #id > 0 then return id, false end
-  end
-  local handle = io.popen("uuidgen")
-  local id = handle:read("*l")
-  handle:close()
-  local out = io.open(path, "w")
-  out:write(id)
-  out:close()
-  return id, true
-end
-
-local function getOrCreateSessionId()
-  return getOrCreateSessionIdAt(SESSION_ID_PATH)
-end
 
 local MEETING_INSTRUCTIONS =
   "You just heard some live audio from a meeting/conversation, transcribed below (may include " ..
@@ -236,10 +227,122 @@ local function showAnswer(displayText, caveatNote, footerNote)
   answerWindow:start()
 end
 
-local function claudeCall(args, callback)
-  local task = hs.task.new(CLAUDE_BIN, callback, args)
+-- Low-level, single-attempt Claude invocation. callback(exitCode, answerText, stdErr).
+-- imagePaths is accepted for signature parity with invokeCodex but unused —
+-- Claude's Read tool pulls files by path mentioned in the prompt text itself,
+-- there's no separate CLI-level attach step.
+local function invokeClaude(prompt, imagePaths, sessionId, isNew, callback)
+  local args = {"-p", prompt, "--allowedTools", "Read"}
+  table.insert(args, isNew and "--session-id" or "--resume")
+  table.insert(args, sessionId)
+  local task = hs.task.new(CLAUDE_BIN, function(exitCode, stdOut, stdErr)
+    callback(exitCode, stdOut, stdErr, nil) -- nil: Claude keeps the id we chose, nothing new to capture
+  end, args)
   task:setWorkingDirectory(CONTEXT_DIR)
   task:start()
+end
+
+-- Low-level, single-attempt Codex invocation. Same callback shape as
+-- invokeClaude, plus a captured session id (Codex generates its own — unlike
+-- Claude we can't choose it up front, only learn it from the response header).
+-- `-s read-only` sandboxes it (no writes) on the fresh call; resume calls
+-- inherit that setting automatically, don't need to repeat it. Background
+-- PDFs aren't attached via -i (Codex's image-attach only handles real image
+-- formats) — Codex reads them itself via a real shell command (e.g.
+-- `pdftotext`) since it has read-only shell access, same as it'd read any
+-- other path mentioned in the prompt text.
+local function invokeCodex(prompt, imagePaths, sessionId, isNew, callback)
+  os.remove(CODEX_OUT_PATH)
+  local args = {"exec"}
+  if not isNew then
+    table.insert(args, "resume")
+    table.insert(args, sessionId)
+  end
+  table.insert(args, prompt)
+  for _, p in ipairs(imagePaths or {}) do
+    table.insert(args, "-i")
+    table.insert(args, p)
+  end
+  if isNew then
+    table.insert(args, "-s")
+    table.insert(args, "read-only")
+  end
+  table.insert(args, "--skip-git-repo-check")
+  table.insert(args, "-o")
+  table.insert(args, CODEX_OUT_PATH)
+
+  local task = hs.task.new(CODEX_BIN, function(exitCode, stdOut, stdErr)
+    local capturedId = stdOut and stdOut:match("session id: ([%w%-]+)")
+    local answer = nil
+    local f = io.open(CODEX_OUT_PATH, "r")
+    if f then
+      answer = f:read("*a")
+      f:close()
+    end
+    if exitCode ~= 0 or not answer then
+      callback(exitCode ~= 0 and exitCode or 1, nil, stdErr or "", capturedId)
+    else
+      callback(0, answer, stdErr or "", capturedId)
+    end
+  end, args)
+  task:setWorkingDirectory(CONTEXT_DIR)
+  task:start()
+end
+
+-- Provider-agnostic entry point: owns the whole session lifecycle (read
+-- existing id / create fresh / self-heal if the session's gone) so callers
+-- just supply the two prompt variants and get back (exitCode, answerText,
+-- stdErr) same as the old direct claudeCall shape.
+local function runAgentSession(freshPrompt, resumePrompt, imagePaths, sessionPath, callback)
+  local function persistSessionId(id)
+    if id and #id > 0 then
+      local out = io.open(sessionPath, "w")
+      out:write(id)
+      out:close()
+    end
+  end
+
+  local function runFresh()
+    if ACTIVE_PROVIDER == "codex" then
+      invokeCodex(freshPrompt, imagePaths, nil, true, function(exitCode, answer, stdErr, capturedId)
+        if capturedId then persistSessionId(capturedId) end
+        callback(exitCode, answer, stdErr)
+      end)
+    else
+      local handle = io.popen("uuidgen")
+      local id = handle:read("*l")
+      handle:close()
+      persistSessionId(id)
+      invokeClaude(freshPrompt, imagePaths, id, true, function(exitCode, answer, stdErr)
+        callback(exitCode, answer, stdErr)
+      end)
+    end
+  end
+
+  local existingId = nil
+  local f = io.open(sessionPath, "r")
+  if f then
+    existingId = f:read("*l")
+    f:close()
+  end
+
+  if not existingId or #existingId == 0 then
+    runFresh()
+    return
+  end
+
+  local invoke = ACTIVE_PROVIDER == "codex" and invokeCodex or invokeClaude
+  invoke(resumePrompt, imagePaths, existingId, false, function(exitCode, answer, stdErr, capturedId)
+    local sessionGone =
+      (ACTIVE_PROVIDER == "codex" and stdErr and stdErr:match("no rollout found"))
+      or (ACTIVE_PROVIDER == "claude" and exitCode ~= 0 and stdErr and stdErr:match("No conversation found"))
+    if sessionGone then
+      runFresh()
+      return
+    end
+    if capturedId then persistSessionId(capturedId) end
+    callback(exitCode, answer, stdErr)
+  end)
 end
 
 -- Pulls the caveat note (if any) off the very end of the response. A caveat
@@ -322,24 +425,8 @@ local function handleFinalResult(exitCode, stdOut, stdErr)
   showAnswer(mainText, caveatNote)
 end
 
-local function runFreshWithContext(sessionId)
-  claudeCall({"-p", FIRST_PROMPT, "--allowedTools", "Read", "--session-id", sessionId}, handleFinalResult)
-end
-
 local function runClaudeOnScreenshot()
-  local sessionId, isNew = getOrCreateSessionId()
-  if isNew then
-    runFreshWithContext(sessionId)
-    return
-  end
-  claudeCall({"-p", RESUME_PROMPT, "--allowedTools", "Read", "--resume", sessionId}, function(exitCode, stdOut, stdErr)
-    if exitCode ~= 0 and stdErr and stdErr:match("No conversation found") then
-      -- session expired/was deleted server-side; recreate it under the same id
-      runFreshWithContext(sessionId)
-      return
-    end
-    handleFinalResult(exitCode, stdOut, stdErr)
-  end)
+  runAgentSession(FIRST_PROMPT, RESUME_PROMPT, {SHOT_PATH}, SESSION_ID_PATH, handleFinalResult)
 end
 
 local function captureAndAsk()
@@ -391,28 +478,12 @@ local function meetingHandleFinalResult(exitCode, stdOut, stdErr)
 end
 
 local function meetingClaudeCall(transcript)
-  local sessionId, isNew = getOrCreateSessionIdAt(MEETING_SESSION_ID_PATH)
-
-  local function runFresh()
-    claudeCall(
-      {"-p", buildMeetingFirstPrompt(transcript), "--allowedTools", "Read", "--session-id", sessionId},
-      meetingHandleFinalResult
-    )
-  end
-
-  if isNew then
-    runFresh()
-    return
-  end
-  claudeCall(
-    {"-p", buildMeetingResumePrompt(transcript), "--allowedTools", "Read", "--resume", sessionId},
-    function(exitCode, stdOut, stdErr)
-      if exitCode ~= 0 and stdErr and stdErr:match("No conversation found") then
-        runFresh()
-        return
-      end
-      meetingHandleFinalResult(exitCode, stdOut, stdErr)
-    end
+  runAgentSession(
+    buildMeetingFirstPrompt(transcript),
+    buildMeetingResumePrompt(transcript),
+    {SHOT_PATH},
+    MEETING_SESSION_ID_PATH,
+    meetingHandleFinalResult
   )
 end
 
